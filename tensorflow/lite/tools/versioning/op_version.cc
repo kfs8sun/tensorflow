@@ -116,6 +116,10 @@ int GetBuiltinOperatorVersion(const OpSignature& op_sig) {
       return 1;
 
     case BuiltinOperator_SVDF:
+      // Fully integer SVDF has int8 as input and is of version 3.
+      if (op_sig.input_types.at(0) == TensorType_INT8) {
+        return 3;
+      }
       // If the op is a signed int8 hybrid operation, we need to return
       // version 2.
       if (op_sig.input_types.at(0) == TensorType_FLOAT32 &&
@@ -144,6 +148,13 @@ int GetBuiltinOperatorVersion(const OpSignature& op_sig) {
       if (op_sig.input_types.at(0) == TensorType_BOOL) {
         return 3;
       }
+      if (op_sig.input_types.at(0) == TensorType_INT8) {
+        return 2;
+      }
+      return 1;
+
+    case BuiltinOperator_TRANSPOSE_CONV:
+      // If the op takes int8 input, it is version 2.
       if (op_sig.input_types.at(0) == TensorType_INT8) {
         return 2;
       }
@@ -212,6 +223,10 @@ int GetBuiltinOperatorVersion(const OpSignature& op_sig) {
           op_sig.input_types.at(0) == TensorType_UINT8) {
         return 2;
       }
+      // If the op take bool input, it is version 3.
+      if (op_sig.input_types.at(0) == TensorType_BOOL) {
+        return 3;
+      }
       return 1;
 
     case BuiltinOperator_DEQUANTIZE:
@@ -243,6 +258,20 @@ int GetBuiltinOperatorVersion(const OpSignature& op_sig) {
         return 2;
       }
       return 1;
+    case BuiltinOperator_STRIDED_SLICE:
+      // If the op takes bool input, it is version 3.
+      if (op_sig.input_types.at(0) == TensorType_BOOL) {
+        return 3;
+      }
+      if (op_sig.input_types.at(0) == TensorType_INT8) {
+        return 2;
+      }
+      return 1;
+    case BuiltinOperator_REVERSE_V2:
+      if (op_sig.input_types.at(0) == TensorType_BOOL) {
+        return 2;
+      }
+      return 1;
 
     case BuiltinOperator_AVERAGE_POOL_2D:
     case BuiltinOperator_ADD:
@@ -268,7 +297,6 @@ int GetBuiltinOperatorVersion(const OpSignature& op_sig) {
     case BuiltinOperator_TANH:
     case BuiltinOperator_LOGISTIC:
     case BuiltinOperator_LOG_SOFTMAX:
-    case BuiltinOperator_STRIDED_SLICE:
     case BuiltinOperator_TOPK_V2:
     case BuiltinOperator_ARG_MAX:
     case BuiltinOperator_ARG_MIN:

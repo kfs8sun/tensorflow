@@ -1,15 +1,14 @@
 # Packaging for TensorFlow artifacts other than the Python API (pip whl).
 # This includes the C API, Java API, and protocol buffer files.
 
-package(default_visibility = ["//visibility:private"])
-
 load("@bazel_tools//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
-load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm")
 load("@local_config_syslibs//:build_defs.bzl", "if_not_system_lib")
 load("//tensorflow:tensorflow.bzl", "VERSION", "VERSION_MAJOR", "if_macos")
-load("//tensorflow/core/platform:default/build_config_root.bzl", "tf_additional_license_deps")
+load("//tensorflow/core/platform:build_config_root.bzl", "tf_additional_license_deps")
 load("//third_party/mkl:build_defs.bzl", "if_mkl")
+
+package(default_visibility = ["//visibility:private"])
 
 genrule(
     name = "libtensorflow_proto",
@@ -137,11 +136,12 @@ pkg_tar(
 genrule(
     name = "clicenses_generate",
     srcs = [
-        "//third_party/icu/data:LICENSE",
-        "//third_party/hadoop:LICENSE.txt",
         "//third_party/eigen3:LICENSE",
         "//third_party/fft2d:LICENSE",
+        "//third_party/hadoop:LICENSE.txt",
+        "//third_party/icu/data:LICENSE",
         "@boringssl//:LICENSE",
+        "@com_google_protobuf//:LICENSE",
         "@com_googlesource_code_re2//:LICENSE",
         "@curl//:COPYING",
         "@double_conversion//:LICENSE",
@@ -151,17 +151,19 @@ genrule(
         "@gemmlowp//:LICENSE",
         "@gif//:COPYING",
         "@highwayhash//:LICENSE",
-        "@hwloc//:COPYING",
         "@icu//:icu4c/LICENSE",
         "@libjpeg_turbo//:LICENSE.md",
+        "@llvm-project//llvm:LICENSE.TXT",
+        "@llvm-project//mlir:LICENSE.TXT",
         "@lmdb//:LICENSE",
         "@local_config_sycl//sycl:LICENSE.text",
         "@local_config_tensorrt//:LICENSE",
         "@nasm//:LICENSE",
         "@nsync//:LICENSE",
         "@png//:LICENSE",
-        "@com_google_protobuf//:LICENSE",
+        "@six_archive//:LICENSE",
         "@snappy//:COPYING",
+        "@sobol_data//:LICENSE",
         "@zlib_archive//:zlib.h",
     ] + select({
         "//tensorflow:android": [],
@@ -184,6 +186,11 @@ genrule(
     }) + select({
         "//tensorflow/core/kernels:xsmm": [
             "@libxsmm_archive//:LICENSE.md",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//tensorflow:with_numa_support": [
+            "@hwloc//:COPYING",
         ],
         "//conditions:default": [],
     }) + if_cuda([
@@ -198,9 +205,7 @@ genrule(
             "@grpc//:LICENSE",
             "@grpc//third_party/address_sorting:LICENSE",
         ],
-    ) + if_rocm([
-        "@rocprim_archive//:LICENSE.txt",
-    ]) + tf_additional_license_deps(),
+    ) + tf_additional_license_deps(),
     outs = ["THIRD_PARTY_TF_C_LICENSES"],
     cmd = "$(location :concat_licenses.sh) $(SRCS) >$@",
     tools = [":concat_licenses.sh"],
@@ -209,11 +214,12 @@ genrule(
 genrule(
     name = "jnilicenses_generate",
     srcs = [
-        "//third_party/icu/data:LICENSE",
-        "//third_party/hadoop:LICENSE.txt",
         "//third_party/eigen3:LICENSE",
         "//third_party/fft2d:LICENSE",
+        "//third_party/hadoop:LICENSE.txt",
+        "//third_party/icu/data:LICENSE",
         "@boringssl//:LICENSE",
+        "@com_google_protobuf//:LICENSE",
         "@com_googlesource_code_re2//:LICENSE",
         "@curl//:COPYING",
         "@double_conversion//:LICENSE",
@@ -222,21 +228,23 @@ genrule(
         "@fft2d//:fft2d/readme2d.txt",
         "@gemmlowp//:LICENSE",
         "@gif//:COPYING",
+        "@grpc//:LICENSE",
+        "@grpc//third_party/address_sorting:LICENSE",
         "@highwayhash//:LICENSE",
-        "@hwloc//:COPYING",
         "@icu//:icu4j/main/shared/licenses/LICENSE",
         "@libjpeg_turbo//:LICENSE.md",
+        "@llvm-project//llvm:LICENSE.TXT",
+        "@llvm-project//mlir:LICENSE.TXT",
         "@lmdb//:LICENSE",
         "@local_config_sycl//sycl:LICENSE.text",
         "@local_config_tensorrt//:LICENSE",
         "@nasm//:LICENSE",
         "@nsync//:LICENSE",
         "@png//:LICENSE",
-        "@com_google_protobuf//:LICENSE",
+        "@six_archive//:LICENSE",
         "@snappy//:COPYING",
+        "@sobol_data//:LICENSE",
         "@zlib_archive//:zlib.h",
-        "@grpc//:LICENSE",
-        "@grpc//third_party/address_sorting:LICENSE",
     ] + select({
         "//tensorflow:android": [],
         "//tensorflow:ios": [],
@@ -260,14 +268,17 @@ genrule(
             "@libxsmm_archive//:LICENSE.md",
         ],
         "//conditions:default": [],
+    }) + select({
+        "//tensorflow:with_numa_support": [
+            "@hwloc//:COPYING",
+        ],
+        "//conditions:default": [],
     }) + if_cuda([
         "@cub_archive//:LICENSE.TXT",
         "@local_config_nccl//:LICENSE",
     ]) + if_mkl([
         "//third_party/mkl:LICENSE",
         "//third_party/mkl_dnn:LICENSE",
-    ]) + if_rocm([
-        "@rocprim_archive//:LICENSE.txt",
     ]) + tf_additional_license_deps(),
     outs = ["THIRD_PARTY_TF_JNI_LICENSES"],
     cmd = "$(location :concat_licenses.sh) $(SRCS) >$@",

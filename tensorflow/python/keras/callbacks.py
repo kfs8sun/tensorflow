@@ -33,6 +33,7 @@ import numpy as np
 import six
 
 from tensorflow.python.data.ops import iterator_ops
+from tensorflow.python.distribute import distributed_file_utils
 from tensorflow.python.distribute import multi_worker_util
 from tensorflow.python.eager import context
 from tensorflow.python.framework import ops
@@ -48,8 +49,8 @@ from tensorflow.python.ops import summary_ops_v2
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import checkpoint_management
-from tensorflow.python.util.tf_export import keras_export
 from tensorflow.python.util.compat import collections_abc
+from tensorflow.python.util.tf_export import keras_export
 from tensorflow.tools.docs import doc_controls
 
 try:
@@ -171,7 +172,7 @@ def set_callback_parameters(callback_list,
 def _is_generator_like(data):
   """Checks if data is a generator, Sequence, or Iterator."""
   return (hasattr(data, 'next') or hasattr(data, '__next__') or isinstance(
-      data, (Sequence, iterator_ops.Iterator, iterator_ops.IteratorV2)))
+      data, (Sequence, iterator_ops.Iterator, iterator_ops.OwnedIterator)))
 
 
 def make_logs(model, logs, outputs, mode, prefix=''):
@@ -810,18 +811,51 @@ class History(Callback):
 
 @keras_export('keras.callbacks.ModelCheckpoint')
 class ModelCheckpoint(Callback):
-  """Save the model after every epoch.
+  """Callback to save the Keras model or model weights at some frequency.
 
-  `filepath` can contain named formatting options,
-  which will be filled the value of `epoch` and
-  keys in `logs` (passed in `on_epoch_end`).
+  `ModelCheckpoint` callback is used in conjunction with training using
+  `model.fit()` to save a model or weights (in a checkpoint file) at some
+  interval, so the model or weights can be loaded later to continue the training
+  from the state saved.
 
-  For example: if `filepath` is `weights.{epoch:02d}-{val_loss:.2f}.hdf5`,
-  then the model checkpoints will be saved with the epoch number and
-  the validation loss in the filename.
+  A few options this callback provides include:
+
+  - Whether to only keep the model that has achieved the "best performance" so
+    far, or whether to save the model at the end of every epoch regardless of
+    performance.
+  - Definition of 'best'; which quantity to monitor and whether it should be
+    maximized or minimized.
+  - The frequency it should save at. Currently, the callback supports saving at
+    the end of every epoch, or after a fixed number of training samples.
+  - Whether only weights are saved, or the whole model is saved.
+
+  Example:
+
+  ```python
+  EPOCHS = 10
+  checkpoint_filepath = '/tmp/checkpoint'
+  model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+      filepath=checkpoint_filepath,
+      save_weights_only=True,
+      monitor='val_acc',
+      mode='max',
+      save_best_only=True)
+
+  # Model weights are saved at the end of every epoch, if it's the best seen
+  # so far.
+  model.fit(epochs=EPOCHS, callbacks=[model_checkpoint_callback])
+
+  # The model weights (that are considered the best) are loaded into the model.
+  model.load_weights(checkpoint_filepath)
+  ```
 
   Arguments:
-      filepath: string, path to save the model file.
+      filepath: string, path to save the model file. `filepath` can contain
+        named formatting options, which will be filled the value of `epoch` and
+        keys in `logs` (passed in `on_epoch_end`). For example: if `filepath` is
+        `weights.{epoch:02d}-{val_loss:.2f}.hdf5`, then the model checkpoints
+        will be saved with the epoch number and the validation loss in the
+        filename.
       monitor: quantity to monitor.
       verbose: verbosity mode, 0 or 1.
       save_best_only: if `save_best_only=True`, the latest best model according
@@ -1040,8 +1074,8 @@ class ModelCheckpoint(Callback):
 
         self._maybe_remove_file()
       except IOError as e:
-        # `e.errno` appears to be `None` so checking the content of `e.message`.
-        if 'is a directory' in e.message:
+        # `e.errno` appears to be `None` so checking the content of `e.args[0]`.
+        if 'is a directory' in six.ensure_str(e.args[0]):
           raise IOError('Please specify a non-directory filepath for '
                         'ModelCheckpoint. Filepath used is an existing '
                         'directory: {}'.format(filepath))
@@ -1051,7 +1085,14 @@ class ModelCheckpoint(Callback):
     # pylint: disable=protected-access
     if not self.model._in_multi_worker_mode(
     ) or multi_worker_util.should_save_checkpoint():
-      return self.filepath.format(epoch=epoch + 1, **logs)
+      try:
+        # `filepath` may contain placeholders such as `{epoch:02d}` and
+        # `{mape:.2f}`. A mismatch between logged metrics and the path's
+        # placeholders can cause formatting to fail.
+        return self.filepath.format(epoch=epoch + 1, **logs)
+      except KeyError as e:
+        raise KeyError('Failed to format this callback filepath: "{}". '
+                       'Reason: {}'.format(self.filepath, e))
     else:
       # If this is multi-worker training, and this worker should not
       # save checkpoint, we use a temp filepath to store a dummy checkpoint, so
@@ -1167,41 +1208,36 @@ class ModelCheckpoint(Callback):
 
 @keras_export('keras.callbacks.EarlyStopping')
 class EarlyStopping(Callback):
-  """Stop training when a monitored quantity has stopped improving.
+  """Stop training when a monitored metric has stopped improving.
 
-  Arguments:
-      monitor: Quantity to be monitored.
-      min_delta: Minimum change in the monitored quantity
-          to qualify as an improvement, i.e. an absolute
-          change of less than min_delta, will count as no
-          improvement.
-      patience: Number of epochs with no improvement
-          after which training will be stopped.
-      verbose: verbosity mode.
-      mode: One of `{"auto", "min", "max"}`. In `min` mode,
-          training will stop when the quantity
-          monitored has stopped decreasing; in `max`
-          mode it will stop when the quantity
-          monitored has stopped increasing; in `auto`
-          mode, the direction is automatically inferred
-          from the name of the monitored quantity.
-      baseline: Baseline value for the monitored quantity.
-          Training will stop if the model doesn't show improvement over the
-          baseline.
-      restore_best_weights: Whether to restore model weights from
-          the epoch with the best value of the monitored quantity.
-          If False, the model weights obtained at the last step of
-          training are used.
+  Assuming the goal of a training is to minimize the loss. With this, the
+  metric to be monitored would be 'loss', and mode would be 'min'. A
+  `model.fit()` training loop will check at end of every epoch whether
+  the loss is no longer decreasing, considering the `min_delta` and
+  `patience` if applicable. Once it's found no longer decreasing,
+  `model.stop_training` is marked True and the training terminates.
+
+  The quantity to be monitored needs to be available in `logs` dict.
+  To make it so, pass the loss or metrics at `model.compile()`.
 
   Example:
 
-  ```python
-  callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=3)
-  # This callback will stop the training when there is no improvement in
-  # the validation loss for three consecutive epochs.
-  model.fit(data, labels, epochs=100, callbacks=[callback],
-      validation_data=(val_data, val_labels))
-  ```
+  >>> callback = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=3)
+  >>> # This callback will stop the training when there is no improvement in
+  >>> # the validation loss for three consecutive epochs.
+  >>> model = tf.keras.models.Sequential([tf.keras.layers.Dense(10)])
+  >>> model.compile(tf.keras.optimizers.SGD(), loss='mse')
+  >>> history = model.fit(np.arange(100).reshape(5, 20), np.zeros(5),
+  ...                     epochs=10, callbacks=[callback])
+      Train on 5 samples
+      Epoch 1/10
+  5/5 [==============================] - ... loss: 6533.1904
+      Epoch 2/10
+  5/5 [==============================] - ... loss: 110183360.0000
+      Epoch 3/10
+  5/5 [==============================] - ... loss: 1862575718400.0000
+      Epoch 4/10
+  5/5 [==============================] - ... loss: 31485597793124352.0000
   """
 
   def __init__(self,
@@ -1212,6 +1248,32 @@ class EarlyStopping(Callback):
                mode='auto',
                baseline=None,
                restore_best_weights=False):
+    """Initialize an EarlyStopping callback.
+
+    Arguments:
+        monitor: Quantity to be monitored.
+        min_delta: Minimum change in the monitored quantity
+            to qualify as an improvement, i.e. an absolute
+            change of less than min_delta, will count as no
+            improvement.
+        patience: Number of epochs with no improvement
+            after which training will be stopped.
+        verbose: verbosity mode.
+        mode: One of `{"auto", "min", "max"}`. In `min` mode,
+            training will stop when the quantity
+            monitored has stopped decreasing; in `max`
+            mode it will stop when the quantity
+            monitored has stopped increasing; in `auto`
+            mode, the direction is automatically inferred
+            from the name of the monitored quantity.
+        baseline: Baseline value for the monitored quantity.
+            Training will stop if the model doesn't show improvement over the
+            baseline.
+        restore_best_weights: Whether to restore model weights from
+            the epoch with the best value of the monitored quantity.
+            If False, the model weights obtained at the last step of
+            training are used.
+    """
     super(EarlyStopping, self).__init__()
 
     self.monitor = monitor
@@ -1403,6 +1465,7 @@ class TensorBoard(Callback):
   TensorBoard is a visualization tool provided with TensorFlow.
 
   This callback logs events for TensorBoard, including:
+
   * Metrics summary plots
   * Training graph visualization
   * Activation histograms
@@ -1417,6 +1480,13 @@ class TensorBoard(Callback):
 
   You can find more information about TensorBoard
   [here](https://www.tensorflow.org/get_started/summaries_and_tensorboard).
+
+  Example:
+  ```python
+  tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir="./logs")
+  model.fit(x_train, y_train, epochs=2, callbacks=[tensorboard_callback])
+  #run the tensorboard command to view the visualizations
+  ```
 
   Arguments:
       log_dir: the path of the directory where to save the log files to be
@@ -1493,10 +1563,6 @@ class TensorBoard(Callback):
     # True when a trace is running.
     self._is_tracing = False
 
-    # TensorBoard should only write summaries on the chief when in a
-    # Multi-Worker setting.
-    self._chief_worker_only = True
-
   def _validate_kwargs(self, kwargs):
     """Handle arguments were supported in V1."""
     if kwargs.get('write_grads', False):
@@ -1527,6 +1593,12 @@ class TensorBoard(Callback):
   def set_model(self, model):
     """Sets Keras model and writes graph if specified."""
     self.model = model
+
+    # TensorBoard callback involves writing a summary file in a
+    # possibly distributed settings.
+    self._log_write_dir = distributed_file_utils.write_dirpath(
+        self.log_dir, self.model._get_distribution_strategy())  # pylint: disable=protected-access
+
     with context.eager_mode():
       self._close_writers()
       if self.write_graph:
@@ -1585,7 +1657,7 @@ class TensorBoard(Callback):
       def get_logdir(self):
         return self.logdir
 
-    writer = DummyWriter(self.log_dir)
+    writer = DummyWriter(self._log_write_dir)
     projector.visualize_embeddings(writer, config)
 
   def _close_writers(self):
@@ -1612,7 +1684,7 @@ class TensorBoard(Callback):
       A `SummaryWriter` object.
     """
     if writer_name not in self._writers:
-      path = os.path.join(self.log_dir, writer_name)
+      path = os.path.join(self._log_write_dir, writer_name)
       writer = summary_ops_v2.create_file_writer_v2(path)
       self._writers[writer_name] = writer
     return self._writers[writer_name]
@@ -1721,6 +1793,10 @@ class TensorBoard(Callback):
     summary_state.writer = self._prev_summary_writer
     summary_state.step = self._prev_summary_step
 
+    # Safely remove the unneeded temp files.
+    distributed_file_utils.remove_temp_dirpath(
+        self.log_dir, self.model._get_distribution_strategy())  # pylint: disable=protected-access
+
   def _enable_trace(self):
     if context.executing_eagerly():
       summary_ops_v2.trace_on(graph=True, profiler=True)
@@ -1736,7 +1812,7 @@ class TensorBoard(Callback):
         summary_ops_v2.trace_export(
             name='batch_%d' % step,
             step=step,
-            profiler_outdir=os.path.join(self.log_dir, 'train'))
+            profiler_outdir=os.path.join(self._log_write_dir, 'train'))
       self._is_tracing = False
 
   def _log_metrics(self, logs, prefix, step):
@@ -1823,7 +1899,7 @@ class TensorBoard(Callback):
       summary_ops_v2.image(weight_name, w_img, step=epoch)
 
   def _log_embeddings(self, epoch):
-    embeddings_ckpt = os.path.join(self.log_dir, 'train',
+    embeddings_ckpt = os.path.join(self._log_write_dir, 'train',
                                    'keras_embedding.ckpt-{}'.format(epoch))
     self.model.save_weights(embeddings_ckpt)
 

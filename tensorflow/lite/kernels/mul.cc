@@ -15,7 +15,7 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/optimized/integer_ops/mul.h"
 
 #include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/c_api_internal.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/kernels/internal/optimized/cpu_check.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
 #include "tensorflow/lite/kernels/internal/quantization_util.h"
@@ -83,19 +83,11 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     output_size = TfLiteIntArrayCopy(input1->dims);
   }
 
-  if (output->type == kTfLiteUInt8) {
-    CalculateActivationRangeUint8(params->activation, output,
-                                  &data->output_activation_min,
-                                  &data->output_activation_max);
-  }
-  if (output->type == kTfLiteInt8) {
-    CalculateActivationRangeInt8(params->activation, output,
-                                 &data->output_activation_min,
-                                 &data->output_activation_max);
-  }
-
   if (output->type == kTfLiteUInt8 || output->type == kTfLiteInt8 ||
       output->type == kTfLiteInt16) {
+    TF_LITE_ENSURE_STATUS(CalculateActivationRangeQuantized(
+        context, params->activation, output, &data->output_activation_min,
+        &data->output_activation_max));
     double real_multiplier =
         input1->params.scale * input2->params.scale / output->params.scale;
     QuantizeMultiplier(real_multiplier, &data->output_multiplier,
@@ -110,8 +102,6 @@ void EvalMul(TfLiteContext* context, TfLiteNode* node, TfLiteMulParams* params,
              const OpData* data, const TfLiteTensor* input1,
              const TfLiteTensor* input2, TfLiteTensor* output) {
   tflite::ArithmeticParams op_params;
-  // requires_flat_size_broadcast is used for BroadcastMul4DSlow.
-  const bool requires_flat_size_broadcast = !HaveSameShapes(input1, input2);
   const bool need_broadcast = optimized_ops::ProcessBroadcastShapes(
       GetTensorShape(input1), GetTensorShape(input2), &op_params);
 #define TF_LITE_MUL(type, opname, data_type)                             \
@@ -127,13 +117,13 @@ void EvalMul(TfLiteContext* context, TfLiteNode* node, TfLiteMulParams* params,
 
   if (output->type == kTfLiteInt32) {
     if (kernel_type == kReference) {
-      if (requires_flat_size_broadcast) {
+      if (need_broadcast) {
         TF_LITE_MUL(reference_ops, BroadcastMul4DSlow, int32_t);
       } else {
         TF_LITE_MUL(reference_ops, Mul, int32_t);
       }
     } else {
-      if (requires_flat_size_broadcast) {
+      if (need_broadcast) {
         TF_LITE_MUL(optimized_ops, BroadcastMul4DSlow, int32_t);
       } else {
         TF_LITE_MUL(optimized_ops, Mul, int32_t);
@@ -141,16 +131,14 @@ void EvalMul(TfLiteContext* context, TfLiteNode* node, TfLiteMulParams* params,
     }
   } else if (output->type == kTfLiteFloat32) {
     if (kernel_type == kReference) {
-      if (requires_flat_size_broadcast) {
+      if (need_broadcast) {
         TF_LITE_MUL(reference_ops, BroadcastMul4DSlow, float);
       } else {
         TF_LITE_MUL(reference_ops, Mul, float);
       }
     } else {
       if (need_broadcast) {
-        TF_LITE_MUL(optimized_ops, BroadcastMulFivefold, float);
-      } else if (requires_flat_size_broadcast) {
-        TF_LITE_MUL(optimized_ops, BroadcastMul4DSlow, float);
+        TF_LITE_MUL(optimized_ops, BroadcastMulDispatch, float);
       } else {
         TF_LITE_MUL(optimized_ops, Mul, float);
       }
@@ -190,7 +178,7 @@ TfLiteStatus EvalQuantized(TfLiteContext* context, TfLiteNode* node,
         }
       } else {
         if (need_broadcast) {
-          TF_LITE_MUL(optimized_integer_ops, BroadcastMulFivefold, int8_t);
+          TF_LITE_MUL(optimized_integer_ops, BroadcastMulDispatch, int8_t);
         } else {
           TF_LITE_MUL(optimized_integer_ops, Mul, int8_t);
         }
@@ -205,7 +193,7 @@ TfLiteStatus EvalQuantized(TfLiteContext* context, TfLiteNode* node,
         }
       } else {
         if (need_broadcast) {
-          TF_LITE_MUL(optimized_ops, BroadcastMulFivefold, uint8_t);
+          TF_LITE_MUL(optimized_ops, BroadcastMulDispatch, uint8_t);
         } else {
           TF_LITE_MUL(optimized_ops, Mul, uint8_t);
         }
